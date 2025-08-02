@@ -26,7 +26,6 @@ logger = logging.getLogger("geonext-mcp")
 ###############################################################################
 mcp = FastMCP(
     "GeoNeXt‑MCP",
-    description="Geocoding & distance tools exposed over the Model Context Protocol",
     dependencies=["geopy"],  # shows up in the MCP manifest
 )
 
