@@ -1,5 +1,4 @@
 [Unit]
-Description=GeoNeXt MCP geocoding server
 After=network.target
 
 [Service]
