@@ -1,7 +1,15 @@
 from __future__ import annotations
 import os
 import logging
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import (
+    Any,
+    Dict,
+    List,
+    Optional,
+    TypedDict,
+    Union,
+    overload,
+)
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
@@ -10,7 +18,7 @@ from geopy.exc import GeocoderServiceError, GeocoderTimedOut
 from geopy.extra.rate_limiter import RateLimiter
 from geopy.distance import distance as geodistance
 
-load_dotenv()  # honours a local .env in dev
+load_dotenv()
 
 ###############################################################################
 # Logging
@@ -26,13 +34,14 @@ logger = logging.getLogger("geonext-mcp")
 ###############################################################################
 mcp = FastMCP(
     "GeoNeXt‑MCP",
-    dependencies=["geopy"],  # shows up in the MCP manifest
+    dependencies=["geopy"],
 )
 
 ###############################################################################
 # Geocoder factory
 ###############################################################################
 Provider = Nominatim | ArcGIS | Bing
+
 
 def _build_geocoder() -> Provider:
     provider = os.getenv("GEOCODER_PROVIDER", "nominatim").lower()
@@ -57,6 +66,7 @@ def _build_geocoder() -> Provider:
         )
     raise ValueError(f"Unsupported geocoder provider: {provider}")
 
+
 geocoder: Provider = _build_geocoder()
 min_delay = float(os.getenv("GEOCODER_MIN_DELAY", "1.0"))
 geocode = RateLimiter(geocoder.geocode, min_delay_seconds=min_delay)
@@ -66,24 +76,32 @@ reverse = RateLimiter(geocoder.reverse, min_delay_seconds=min_delay)
 # Typed return payloads
 ###############################################################################
 class GeoResult(TypedDict, total=False):
+    """Standardised response shape for all geocoding tools."""
     latitude: float
     longitude: float
     address: str
-    details: dict[str, Any]
-    bounding_box: list[str]
+    details: Dict[str, Any]
+    bounding_box: List[str]
+    raw: Dict[str, Any]  # full provider JSON for maximum context
 
 ###############################################################################
-# MCP tools
+# Low‑level helpers (unchanged)
 ###############################################################################
 @mcp.tool()
 def geocode_location(location: str) -> Optional[GeoResult]:
     """Convert an address / place name to lat, lon and formatted address."""
     try:
         loc = geocode(location)
-        return (
-            {"latitude": loc.latitude, "longitude": loc.longitude, "address": loc.address}
-            if loc
-            else None
+        if not loc:
+            return None
+        raw = loc.raw or {}
+        return GeoResult(
+            latitude=loc.latitude,
+            longitude=loc.longitude,
+            address=loc.address,
+            details=raw.get("address", {}),
+            bounding_box=raw.get("boundingbox", []),
+            raw=raw,
         )
     except (GeocoderTimedOut, GeocoderServiceError) as exc:
         logger.warning("geocode_location error: %s", exc)
@@ -95,10 +113,16 @@ def reverse_geocode(lat: float, lon: float) -> Optional[GeoResult]:
     """Reverse‑geocode a lat/lon pair to the nearest address."""
     try:
         loc = reverse((lat, lon))
-        return (
-            {"latitude": lat, "longitude": lon, "address": loc.address}
-            if loc
-            else None
+        if not loc:
+            return None
+        raw = loc.raw or {}
+        return GeoResult(
+            latitude=lat,
+            longitude=lon,
+            address=loc.address,
+            details=raw.get("address", {}),
+            bounding_box=raw.get("boundingbox", []),
+            raw=raw,
         )
     except (GeocoderTimedOut, GeocoderServiceError) as exc:
         logger.warning("reverse_geocode error: %s", exc)
@@ -119,32 +143,96 @@ def geocode_with_details(location: str) -> Optional[GeoResult]:
             address=loc.address,
             details=raw.get("address", {}),
             bounding_box=raw.get("boundingbox", []),
+            raw=raw,
         )
     except (GeocoderTimedOut, GeocoderServiceError) as exc:
         logger.warning("geocode_with_details error: %s", exc)
         return None
 
+###############################################################################
+# >>> NEW MAIN TOOL FOR THE LLM <<<
+###############################################################################
+@mcp.tool(name="geocode_locations")
+def geocode_locations(
+    locations: Union[str, List[str]],
+    max_results: int = 5,
+) -> Union[List[GeoResult], List[List[GeoResult]]]:
+    """
+    Geocode one **or** many location strings and return **up to `max_results`**
+    candidates *per* query.
 
+    ──────────────────────────────────────────────────────────────────────────
+    Args:
+        locations: A single location string **or** a list of them.
+        max_results: Maximum number of candidates returned for each query
+                     (default = 5).
+
+    Returns:
+        • If the input is a single string  -> List[GeoResult]\n
+        • If the input is a list[str]      -> List[List[GeoResult]] (same order)
+
+    Notes for the LLM:
+        • Each GeoResult contains latitude, longitude, address, address
+          components (`details`), bounding box and the provider's raw JSON.
+        • Use the extra metadata to choose the best match given the context
+          of the original text. If none appear to match, you may discard them.
+        • Respect `confidence` and `precision` rules in your final answer.
+    """
+    queries = [locations] if isinstance(locations, str) else locations
+    all_results: List[List[GeoResult]] = []
+
+    for query in queries:
+        try:
+            raw_locs = geocode(  # Rate‑limited wrapper
+                query,
+                exactly_one=False,
+                limit=max_results,
+                addressdetails=True,
+            )
+        except (GeocoderTimedOut, GeocoderServiceError) as exc:
+            logger.warning("geocode_locations error: %s", exc)
+            all_results.append([])
+            continue
+
+        candidates: List[GeoResult] = []
+        if raw_locs:
+            for loc in raw_locs[:max_results]:
+                r = loc.raw or {}
+                candidates.append(
+                    GeoResult(
+                        latitude=loc.latitude,
+                        longitude=loc.longitude,
+                        address=loc.address,
+                        details=r.get("address", {}),
+                        bounding_box=r.get("boundingbox", []),
+                        raw=r,
+                    )
+                )
+        all_results.append(candidates)
+
+    return all_results[0] if isinstance(locations, str) else all_results
+
+###############################################################################
+# Legacy bulk helpers remain (optional now but harmless)
+###############################################################################
 @mcp.tool()
 def geocode_multiple_locations(
     locations: List[str],
 ) -> List[Optional[GeoResult]]:
-    """Bulk geocode; honour min‑delay to stay within service quotas."""
-    results: List[Optional[GeoResult]] = []
-    for loc in locations:
-        results.append(geocode_location(loc))
-    return results
+    """Bulk geocode; single top result per query (legacy)."""
+    return [geocode_location(loc) for loc in locations]
 
 
 @mcp.tool()
 def reverse_geocode_multiple_locations(
     coords: List[List[float]],
 ) -> List[Optional[GeoResult]]:
-    """Bulk reverse‑geocode; coords is a list of [lat, lon] pairs."""
-    results: List[Optional[GeoResult]] = []
-    for lat, lon in (pair for pair in coords if len(pair) == 2):
-        results.append(reverse_geocode(lat, lon))
-    return results
+    """Bulk reverse‑geocode a list of [lat, lon] pairs."""
+    return [
+        reverse_geocode(lat, lon) if len(pair) == 2 else None
+        for pair in coords
+        for lat, lon in [pair]  # quick destructuring
+    ]
 
 
 @mcp.tool()
@@ -172,7 +260,7 @@ def _distance_between_coords(
 ###############################################################################
 # Entrypoint
 ###############################################################################
-def main() -> None:  # makes `python -m geonext_mcp` possible
+def main() -> None:
     mcp.run(
         transport="sse",
         host=os.getenv("HOST", "0.0.0.0"),

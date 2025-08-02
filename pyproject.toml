@@ -9,10 +9,6 @@ dependencies = [
   "uvicorn[standard]>=0.29",
 ]
 
-# ────────────────────────────────────────────────────────────────────────────────
-# Tell setuptools to package ONLY geonext_mcp, and ignore 'systemd/'
-# ────────────────────────────────────────────────────────────────────────────────
 [tool.setuptools.packages.find]
 include = ["geonext_mcp*"]   # what to keep
 exclude = ["systemd*"]       # what to skip
-# ────────────────────────────────────────────────────────────────────────────────
