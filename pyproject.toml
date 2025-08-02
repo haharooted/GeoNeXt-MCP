@@ -1,14 +1,14 @@
 [project]
-name = "Geonext-MCP"
-dynamic = ["version"]
-description = "Geocoding MCP server based on GeoPY backend"
-readme = "README.md"
-requires-python = ">=3.12"
+name = "geonext-mcp"
+version = "0.2.0"
+description = "FastMCP geocoding server (Nominatim, Bing, ArcGIS) out‑of‑the‑box"
+requires-python = ">=3.11"
 dependencies = [
-    "geopy>=2.4.1",
-    "mcp[cli]>=1.2.0",
+  "fastmcp>=2.2.1",
+  "geopy>=2.4.1",
+  "python-dotenv>=1.0",   # optional, just for local .env loading
+  "uvicorn[standard]>=0.29",
 ]
 
-
-[tool.hatch.version]
-path = "geonext-mcp.py"
+[project.scripts]
+geonext-mcp = "geonext_mcp.server:main"

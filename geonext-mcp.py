@@ -1,251 +1,185 @@
-from geopy.geocoders import Nominatim, ArcGIS, Bing
-from geopy.exc import GeocoderTimedOut, GeocoderServiceError
+from __future__ import annotations
 import os
+import logging
+from typing import Any, Dict, List, Optional, TypedDict
+
+from dotenv import load_dotenv
+from fastmcp import FastMCP
+from geopy.geocoders import Nominatim, ArcGIS, Bing
+from geopy.exc import GeocoderServiceError, GeocoderTimedOut
 from geopy.extra.rate_limiter import RateLimiter
-from geopy.distance import distance
-from mcp.server.fastmcp import FastMCP
+from geopy.distance import distance as geodistance
 
+load_dotenv()  # honours a local .env in dev
 
-__version__ = "0.1.0"
+###############################################################################
+# Logging
+###############################################################################
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+)
+logger = logging.getLogger("geonext-mcp")
 
-# Instantiate FastMCP server
-mcp = FastMCP("GeoNeXt-MCP", dependencies=["geopy"])
+###############################################################################
+# FastMCP server instance
+###############################################################################
+mcp = FastMCP(
+    "GeoNeXt‑MCP",
+    description="Geocoding & distance tools exposed over the Model Context Protocol",
+    dependencies=["geopy"],  # shows up in the MCP manifest
+)
 
+###############################################################################
+# Geocoder factory
+###############################################################################
+Provider = Nominatim | ArcGIS | Bing
 
+def _build_geocoder() -> Provider:
+    provider = os.getenv("GEOCODER_PROVIDER", "nominatim").lower()
+    if provider == "nominatim":
+        return Nominatim(
+            user_agent=os.getenv("NOMINATIM_USER_AGENT", "geonext-mcp/0.2.0"),
+            domain=os.getenv("NOMINATIM_URL", "nominatim.openstreetmap.org"),
+            scheme=os.getenv("SCHEME", "https"),
+            timeout=10,
+        )
+    if provider == "bing":
+        key = os.getenv("BING_API_KEY")
+        if not key:
+            raise RuntimeError("BING_API_KEY is required when GEOCODER_PROVIDER=bing")
+        return Bing(api_key=key, timeout=10)
+    if provider == "arcgis":
+        return ArcGIS(
+            username=os.getenv("ARC_USERNAME"),
+            password=os.getenv("ARC_PASSWORD"),
+            referer=os.getenv("ARC_REFERER"),
+            timeout=10,
+        )
+    raise ValueError(f"Unsupported geocoder provider: {provider}")
 
-# If you need HTTPS, ensure scheme='https' and domain=some-url.
+geocoder: Provider = _build_geocoder()
+min_delay = float(os.getenv("GEOCODER_MIN_DELAY", "1.0"))
+geocode = RateLimiter(geocoder.geocode, min_delay_seconds=min_delay)
+reverse = RateLimiter(geocoder.reverse, min_delay_seconds=min_delay)
 
-# Decide which geocoder to use based on env var
-geocoder_name = os.environ.get("GEOCODER_PROVIDER", "nominatim").lower()
+###############################################################################
+# Typed return payloads
+###############################################################################
+class GeoResult(TypedDict, total=False):
+    latitude: float
+    longitude: float
+    address: str
+    details: dict[str, Any]
+    bounding_box: list[str]
 
-if geocoder_name == "nominatim":
-    domain = os.environ.get("NOMINATIM_URL", "nominatim.openstreetmap.org")
-    scheme = os.environ.get("SCHEME", "https")
-    user_agent = os.environ.get("NOMINATIM_USER_AGENT", "geonext-mcp/0.1.0")
-    app = Nominatim(domain=domain, scheme=scheme, user_agent=user_agent)
-elif geocoder_name == "arcgis":
-    # ArcGIS typically just works; optionally pass username/password or referer
-    # if needed for premium data.
-    # Read additional env vars if you have them, e.g., ARC_USERNAME, ARC_PASSWORD
-    # i dont use this but if desired, you can add the env vars to the mcp server config
-    app = ArcGIS(user=os.environ.get("ARC_USERNAME", ""), password=os.environ.get("ARC_PASSWORD", ""))
-elif geocoder_name == "bing":
-    # For Bing, you typically need an API key
-    bing_key = os.environ.get("BING_API_KEY", "")
-    if not bing_key:
-        raise ValueError("Missing BING_API_KEY env var for Bing geocoder.")
-    app = Bing(api_key=bing_key)
-else:
-    raise ValueError(f"Unsupported geocoder provider: {geocoder_name}")
-
-
-geocode = RateLimiter(app.geocode, min_delay_seconds=1)
-reverse = RateLimiter(app.reverse, min_delay_seconds=1)
-
-
-
-
-
+###############################################################################
+# MCP tools
+###############################################################################
 @mcp.tool()
-def geocode_location(location_str: str) -> dict | None:
-    """
-    Geocodes a single location string (an address or place name).
-    Returns {'latitude', 'longitude', 'address'} or None if not found.
-    """
+def geocode_location(location: str) -> Optional[GeoResult]:
+    """Convert an address / place name to lat, lon and formatted address."""
     try:
-        location = geocode.geocode(location_str)
-        if not location:
-            return None
-        return {
-            "latitude": location.latitude,
-            "longitude": location.longitude,
-            "address": location.address
-        }
-    except (GeocoderTimedOut, GeocoderServiceError) as e:
-        print(f"Geocoding error: {e}")
+        loc = geocode(location)
+        return (
+            {"latitude": loc.latitude, "longitude": loc.longitude, "address": loc.address}
+            if loc
+            else None
+        )
+    except (GeocoderTimedOut, GeocoderServiceError) as exc:
+        logger.warning("geocode_location error: %s", exc)
         return None
 
 
 @mcp.tool()
-def reverse_geocode(lat: float, lon: float) -> dict | None:
-    """
-    Reverse geocodes a latitude and longitude to find the nearest address.
-    Returns {'latitude', 'longitude', 'address'} or None if not found.
-    """
+def reverse_geocode(lat: float, lon: float) -> Optional[GeoResult]:
+    """Reverse‑geocode a lat/lon pair to the nearest address."""
     try:
-        location = reverse.reverse((lat, lon))
-        if not location:
-            return None
-        return {
-            "latitude": lat,
-            "longitude": lon,
-            "address": location.address
-        }
-    except (GeocoderTimedOut, GeocoderServiceError) as e:
-        print(f"Reverse geocoding error: {e}")
+        loc = reverse((lat, lon))
+        return (
+            {"latitude": lat, "longitude": lon, "address": loc.address}
+            if loc
+            else None
+        )
+    except (GeocoderTimedOut, GeocoderServiceError) as exc:
+        logger.warning("reverse_geocode error: %s", exc)
         return None
 
 
 @mcp.tool()
-def geocode_with_details(location_str: str) -> dict | None:
-    """
-    Geocodes a single location string with extra details such as bounding box
-    and detailed address info, if available.
-    """
+def geocode_with_details(location: str) -> Optional[GeoResult]:
+    """Geocode with bounding box & raw address details (when available)."""
     try:
-        location = app.geocode(location_str, addressdetails=True)
-        if not location:
+        loc = geocoder.geocode(location, addressdetails=True)
+        if not loc:
             return None
-        return {
-            "latitude": location.latitude,
-            "longitude": location.longitude,
-            "address": location.address,
-            "details": location.raw.get("address", {}),
-            "bounding_box": location.raw.get("boundingbox", [])
-        }
-    except (GeocoderTimedOut, GeocoderServiceError) as e:
-        print(f"Geocoding error: {e}")
+        raw = loc.raw or {}
+        return GeoResult(
+            latitude=loc.latitude,
+            longitude=loc.longitude,
+            address=loc.address,
+            details=raw.get("address", {}),
+            bounding_box=raw.get("boundingbox", []),
+        )
+    except (GeocoderTimedOut, GeocoderServiceError) as exc:
+        logger.warning("geocode_with_details error: %s", exc)
         return None
 
 
 @mcp.tool()
-def geocode_multiple_locations(location_strs: list[str]) -> list[dict | None]:
-    """
-    Geocodes multiple address strings, returning a list of results.
-    Each element is either:
-      {
-        "latitude": float,
-        "longitude": float,
-        "address": str
-      }
-    or None if no result was found.
-    This function uses the same RateLimiter above, so it waits min_delay_seconds
-    between each geocode call to respect usage limits.
-    """
-    results = []
-    for loc_str in location_strs:
-        try:
-            location = geocode.geocode(loc_str)
-            if not location:
-                results.append(None)
-            else:
-                results.append({
-                    "latitude": location.latitude,
-                    "longitude": location.longitude,
-                    "address": location.address
-                })
-        except (GeocoderTimedOut, GeocoderServiceError) as e:
-            print(f"Geocoding error for '{loc_str}': {e}")
-            results.append(None)
-    return results
-
-@mcp.tool()
-def reverse_geocode_multiple_locations(coords: list[list[float]]) -> list[dict | None]:
-    """
-    Reverse geocodes multiple [latitude, longitude] pairs to find the nearest address.
-
-    Each item in `coords` should be a list with two floats: [lat, lon].
-    Example: [[37.7749, -122.4194], [40.7128, -74.0060]]
-
-    Returns a list of results, where each result is either:
-        {
-          "latitude": float,
-          "longitude": float,
-          "address": str
-        }
-    or None if the location could not be found or an error occurred.
-
-    This function uses the same RateLimiter above, so it waits at least
-    min_delay_seconds between each reverse geocode call.
-    """
-    results = []
-    for latlon in coords:
-        if len(latlon) != 2:
-            # If there's a malformed input, skip it
-            results.append(None)
-            continue
-
-        lat, lon = latlon
-        try:
-            location = reverse.reverse((lat, lon))
-            if not location:
-                results.append(None)
-            else:
-                results.append({
-                    "latitude": lat,
-                    "longitude": lon,
-                    "address": location.address
-                })
-        except (GeocoderTimedOut, GeocoderServiceError) as e:
-            print(f"Reverse geocoding error for ({lat}, {lon}): {e}")
-            results.append(None)
-
+def geocode_multiple_locations(
+    locations: List[str],
+) -> List[Optional[GeoResult]]:
+    """Bulk geocode; honour min‑delay to stay within service quotas."""
+    results: List[Optional[GeoResult]] = []
+    for loc in locations:
+        results.append(geocode_location(loc))
     return results
 
 
 @mcp.tool()
-def distance_between_addresses(address1: str, address2: str, unit: str = "kilometers") -> float | None:
-    """
-    Calculate the distance between two addresses or place names.
-
-    :param address1: The first address or place name.
-    :param address2: The second address or place name.
-    :param unit: "kilometers" (default) or "miles".
-
-    Returns the distance in the specified unit, or None if either address could not be geocoded.
-    """
-    # Geocode both addresses
-    loc1 = geocode.geocode(address1)
-    loc2 = geocode.geocode(address2)
-
-    if not loc1 or not loc2:
-        # If we couldn't geocode either one, return None
-        return None
-
-    # Extract lat/lon for each location
-    coords1 = (loc1.latitude, loc1.longitude)
-    coords2 = (loc2.latitude, loc2.longitude)
-
-    # Calculate geodesic distance
-    distance = distance(coords1, coords2)
-    
-    # Return in the specified unit
-    if unit.lower() == "miles":
-        return distance.miles
-    else:
-        # Default is kilometers
-        return distance.kilometers
+def reverse_geocode_multiple_locations(
+    coords: List[List[float]],
+) -> List[Optional[GeoResult]]:
+    """Bulk reverse‑geocode; coords is a list of [lat, lon] pairs."""
+    results: List[Optional[GeoResult]] = []
+    for lat, lon in (pair for pair in coords if len(pair) == 2):
+        results.append(reverse_geocode(lat, lon))
+    return results
 
 
 @mcp.tool()
-def distance_between_coords(
+def distance_between_addresses(
+    address1: str, address2: str, unit: str = "kilometers"
+) -> Optional[float]:
+    """Distance between two addresses."""
+    loc1 = geocode_location(address1)
+    loc2 = geocode_location(address2)
+    if not (loc1 and loc2):
+        return None
+    return _distance_between_coords(
+        loc1["latitude"], loc1["longitude"], loc2["latitude"], loc2["longitude"], unit
+    )
+
+
+@mcp.tool(name="distance_between_coords")
+def _distance_between_coords(
     lat1: float, lon1: float, lat2: float, lon2: float, unit: str = "kilometers"
 ) -> float:
-    """
-    Calculate the distance between two lat/lon pairs.
+    """Distance between two lat/lon points."""
+    dist = geodistance((lat1, lon1), (lat2, lon2))
+    return dist.miles if unit.lower().startswith("mile") else dist.kilometers
 
-    :param lat1: Latitude of the first location.
-    :param lon1: Longitude of the first location.
-    :param lat2: Latitude of the second location.
-    :param lon2: Longitude of the second location.
-    :param unit: "kilometers" (default) or "miles".
-
-    Returns the distance in the specified unit.
-    """
-    coords1 = (lat1, lon1)
-    coords2 = (lat2, lon2)
-
-    distance = distance(coords1, coords2)
-    
-    if unit.lower() == "miles":
-        return distance.miles
-    else:
-        return distance.kilometers
+###############################################################################
+# Entrypoint
+###############################################################################
+def main() -> None:  # makes `python -m geonext_mcp` possible
+    mcp.run(
+        transport="http",          # Fast streaming HTTP transport
+        host=os.getenv("HOST", "0.0.0.0"),
+        port=int(os.getenv("PORT", "8000")),
+        log_level=os.getenv("UVICORN_LOG_LEVEL", "info"),
+    )
 
 if __name__ == "__main__":
-    mcp.run(
-        transport="http",   # long-running Uvicorn server
-        host="0.0.0.0",
-        port=8000,
-        log_level="info",
-    )
+    main()

@@ -1,0 +1,15 @@
+[Unit]
+Description=GeoNeXt MCP geocoding server
+After=network.target
+
+[Service]
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/geonext-mcp
+EnvironmentFile=/opt/geonext-mcp/.env
+ExecStart=/opt/geonext-mcp/.venv/bin/geonext-mcp
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
