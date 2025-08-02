@@ -174,7 +174,7 @@ def _distance_between_coords(
 ###############################################################################
 def main() -> None:  # makes `python -m geonext_mcp` possible
     mcp.run(
-        transport="http",          # Fast streaming HTTP transport
+        transport="sse",          # Fast streaming HTTP transport
         host=os.getenv("HOST", "0.0.0.0"),
         port=int(os.getenv("PORT", "8000")),
         log_level=os.getenv("UVICORN_LOG_LEVEL", "info"),
