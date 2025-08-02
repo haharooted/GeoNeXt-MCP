@@ -1,98 +1,143 @@
 #!/usr/bin/env bash
-# ------------------------------------------
-# GeoNeXt-MCP auto-deploy w/ sslip.io | nip.io
-# Ubuntu 24.04 LTS  ·  Hetzner Cloud
-# ------------------------------------------
+# ---------------------------------------------------------------------------
+# GeoNeXt‑MCP one‑shot provisioning script for a fresh Ubuntu 24.04 server
+# Tested on Hetzner Cloud; run as root (or with sudo -i).
+# ---------------------------------------------------------------------------
 set -euo pipefail
 
-##############  CONFIGURATION  ################
-PROJECT_NAME="geonext-mcp"
-APP_USER="mcp"
-REPO_URL="https://github.com/haharooted/GeoNeXt-MCP.git"   # <-- edit
-DNS_PROVIDER="sslip"        # sslip | nip
-NAME_PREFIX=""              # optional: e.g. "api-" → api-95-217-…sslip.io
-EMAIL="you@example.com"     # for certbot
-GEOCODER_PROVIDER="nominatim"
-NOMINATIM_URL="nominatim.openstreetmap.org"
-SCHEME="https"
-BING_API_KEY=""
-PYTHON_VERSION="3.12"
-###############################################
+##############################################################################
+# ❶ Basic variables – EDIT *ONLY* THE EMAIL ADDRESS!
+##############################################################################
+EMAIL="daboss@gmail.com"            # **REQUIRED** for Let's Encrypt
+REPO="https://github.com/haharooted/geonext-mcp.git"
+APP_DIR="/opt/geonext-mcp"
+SERVICE_FILE="/etc/systemd/system/geonext-mcp.service"
+NGINX_CONF="/etc/nginx/sites-available/geonext-mcp.conf"
 
-echo "==> Detecting public IP …"
-PUBLIC_IP=$(curl -s https://ipinfo.io/ip)
-DASH_IP=${PUBLIC_IP//./-}
-DOMAIN="${NAME_PREFIX}${DASH_IP}.${DNS_PROVIDER}.io"
-echo "    Chosen hostname: ${DOMAIN}"
+if [[ $EUID -ne 0 ]]; then
+  echo "Error: run this script as root (sudo -i)."; exit 1
+fi
+if [[ -z "$EMAIL" || "$EMAIL" == "your@email.address" ]]; then
+  echo "Error: please set a real contact e‑mail in deploy.sh before running."; exit 1
+fi
 
-echo "==> Updating OS & installing base packages …"
-apt update && apt -y full-upgrade
-apt install -y python${PYTHON_VERSION} python3-venv python3-pip git nginx ufw \
-               certbot python3-certbot-nginx
+##############################################################################
+# ❷ System packages
+##############################################################################
+echo "→ Updating apt and installing base packages …"
+apt-get update -qq
+DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y -qq
+apt-get install -y -qq git nginx python3 python3-venv python3-pip \
+                        certbot python3-certbot-nginx curl ufw
 
-echo "==> Creating service account & cloning repo …"
-id -u "${APP_USER}" &>/dev/null || adduser --system --group --no-create-home "${APP_USER}"
-install -d -o "${APP_USER}" -g "${APP_USER}" /opt/${PROJECT_NAME}
-git clone "${REPO_URL}" /opt/${PROJECT_NAME}
+##############################################################################
+# ❸ Clone / update code and build virtual‑env
+##############################################################################
+echo "→ Deploying application code …"
+if [[ -d "$APP_DIR/.git" ]]; then
+  git -C "$APP_DIR" pull --ff-only
+else
+  git clone "$REPO" "$APP_DIR"
+fi
 
-echo "==> Python virtual-env & dependencies …"
-python${PYTHON_VERSION} -m venv /opt/${PROJECT_NAME}/venv
-source /opt/${PROJECT_NAME}/venv/bin/activate
-pip install --upgrade pip
-pip install geopy "uvicorn[standard]" fastapi mcp
-[[ -f /opt/${PROJECT_NAME}/requirements.txt ]] && \
-    pip install -r /opt/${PROJECT_NAME}/requirements.txt
-deactivate
+python3 -m venv "$APP_DIR/.venv"
+"$APP_DIR/.venv/bin/pip" install --upgrade pip
+"$APP_DIR/.venv/bin/pip" install -e "$APP_DIR"
 
-echo "==> systemd unit …"
-cat >/etc/systemd/system/${PROJECT_NAME}.service <<SERVICE
+##############################################################################
+# ❹ Create .env with sane defaults (skip if already present)
+##############################################################################
+ENV_FILE="$APP_DIR/.env"
+if [[ ! -f "$ENV_FILE" ]]; then
+  cat >"$ENV_FILE" <<EOF
+# ---------------------------------------------------------------------------
+# GeoNeXt‑MCP runtime options
+# ---------------------------------------------------------------------------
+LOG_LEVEL=info
+# GEOCODER_PROVIDER=nominatim
+# NOMINATIM_URL=nominatim.openstreetmap.org
+EOF
+  chown root:root "$ENV_FILE"
+  chmod 640 "$ENV_FILE"
+fi
+
+##############################################################################
+# ❺ systemd unit
+##############################################################################
+echo "→ Writing systemd service …"
+cat >"$SERVICE_FILE" <<'EOF'
 [Unit]
-Description=GeoNeXt-MCP
+Description=GeoNeXt‑MCP geocoding microservice
 After=network.target
+
 [Service]
-User=${APP_USER}
-Group=${APP_USER}
-WorkingDirectory=/opt/${PROJECT_NAME}
-Environment=GEOCODER_PROVIDER=${GEOCODER_PROVIDER}
-Environment=NOMINATIM_URL=${NOMINATIM_URL}
-Environment=SCHEME=${SCHEME}
-Environment=BING_API_KEY=${BING_API_KEY}
-ExecStart=/opt/${PROJECT_NAME}/venv/bin/python main.py --host 0.0.0.0 --port 8000
+WorkingDirectory=/opt/geonext-mcp
+EnvironmentFile=/opt/geonext-mcp/.env
+ExecStart=/opt/geonext-mcp/.venv/bin/python -m geonext_mcp.server
 Restart=on-failure
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
+RestartSec=3
+
 [Install]
 WantedBy=multi-user.target
-SERVICE
-systemctl daemon-reload && systemctl enable --now ${PROJECT_NAME}
+EOF
 
-echo "==> Firewall …"
-ufw allow OpenSSH
-ufw allow 80/tcp
-ufw allow 443/tcp
-ufw --force enable
+systemctl daemon-reload
+systemctl enable --now geonext-mcp
 
-echo "==> nginx reverse proxy …"
-cat >/etc/nginx/sites-available/${PROJECT_NAME}.conf <<NGINX
+##############################################################################
+# ❻ sslip.io hostname (▲▲ auto‑detect public IP ▲▲)
+##############################################################################
+IP=$(curl -s https://api.ipify.org)
+DOMAIN="${IP//./-}.sslip.io"
+echo "→ Using sslip.io hostname:  \e[1m$DOMAIN\e[0m"
+
+##############################################################################
+# ❼ Nginx site config – initial HTTP only (Certbot will upgrade to HTTPS)
+##############################################################################
+echo "→ Configuring Nginx …"
+cat >"$NGINX_CONF" <<EOF
 server {
     listen 80;
-    server_name ${DOMAIN};
+    server_name $DOMAIN;
+    root /var/www/html;
+    # Certbot will replace the block below with HTTPS config
     location / {
-        proxy_pass         http://127.0.0.1:8000;
-        proxy_set_header   Host \$host;
-        proxy_set_header   X-Real-IP \$remote_addr;
-        proxy_set_header   X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header   X-Forwarded-Proto \$scheme;
+        proxy_pass          http://127.0.0.1:8000;
+        proxy_set_header    Host \$host;
+        proxy_set_header    X-Real-IP \$remote_addr;
+        proxy_set_header    X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header    X-Forwarded-Proto \$scheme;
+
+        proxy_http_version  1.1;
+        proxy_set_header    Upgrade \$http_upgrade;
+        proxy_set_header    Connection "upgrade";
     }
 }
-NGINX
-ln -sf /etc/nginx/sites-available/${PROJECT_NAME}.conf /etc/nginx/sites-enabled/
+EOF
+
+ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/geonext-mcp.conf
 nginx -t && systemctl reload nginx
 
-echo "==> Let’s Encrypt certificate for ${DOMAIN} …"
-certbot --nginx -d "${DOMAIN}" --non-interactive --agree-tos -m "${EMAIL}" --redirect
+##############################################################################
+# ❽ Let’s Encrypt – obtains cert *and* rewrites nginx to force HTTPS
+##############################################################################
+echo "→ Requesting Let’s Encrypt certificate via Certbot …"
+certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --email "$EMAIL" --redirect
 
-echo "✔  Done!  HTTPS endpoint: https://${DOMAIN}/"
+##############################################################################
+# ❾ Firewall (optional but recommended)
+##############################################################################
+if command -v ufw >/dev/null 2>&1; then
+  echo "→ Enabling UFW firewall …"
+  ufw allow 'OpenSSH'
+  ufw allow 'Nginx Full'
+  ufw --force enable
+fi
+
+##############################################################################
+# ❿ Done 🎉
+##############################################################################
+echo -e "\n🚀  Deployment complete!"
+echo    "    Service URL : https://$DOMAIN"
+echo    "    Status      : $(systemctl is-active geonext-mcp)"
+systemctl status geonext-mcp --no-pager --full
