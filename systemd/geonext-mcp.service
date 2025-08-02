@@ -4,7 +4,7 @@ After=network.target
 [Service]
 WorkingDirectory=/opt/geonext-mcp
 EnvironmentFile=/opt/geonext-mcp/.env
-ExecStart=/opt/geonext-mcp/.venv/bin/geonext-mcp
+ExecStart=/opt/geonext-mcp/.venv/bin/python -m geonext_mcp.server
 Restart=on-failure
 RestartSec=3
 
