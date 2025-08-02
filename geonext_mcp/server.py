@@ -152,7 +152,7 @@ def geocode_with_details(location: str) -> Optional[GeoResult]:
 ###############################################################################
 # >>> NEW MAIN TOOL FOR THE LLM <<<
 ###############################################################################
-@mcp.tool(name="geocode_locations")
+@mcp.tool()
 def geocode_locations(
     locations: Union[str, List[str]],
     max_results: int = 5,
