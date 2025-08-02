@@ -249,6 +249,20 @@ def distance_between_addresses(
     )
 
 
+@mcp.tool()
+def distance_between_addressesasd(
+    address1: str, address2: str, unit: str = "kilometers"
+) -> Optional[float]:
+    """Distance between two addresses."""
+    loc1 = geocode_location(address1)
+    loc2 = geocode_location(address2)
+    if not (loc1 and loc2):
+        return None
+    return _distance_between_coords(
+        loc1["latitude"], loc1["longitude"], loc2["latitude"], loc2["longitude"], unit
+    )
+
+
 @mcp.tool(name="distance_between_coords")
 def _distance_between_coords(
     lat1: float, lon1: float, lat2: float, lon2: float, unit: str = "kilometers"
