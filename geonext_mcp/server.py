@@ -14,6 +14,8 @@ from typing import (
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
+import inspect
+from functools import partial
 from geopy.distance import distance as geodistance
 from geopy.exc import GeocoderServiceError, GeocoderTimedOut
 from geopy.extra.rate_limiter import RateLimiter
@@ -24,6 +26,14 @@ from geopy.geocoders import (
     Photon,
     GoogleV3,
 )
+
+def _safe_geocode(geo, query: str, **extra):
+    """
+    Call ``geo.geocode`` but drop any kwargs the provider does not accept.
+    """
+    sig = inspect.signature(geo.geocode)
+    accepted = {k: v for k, v in extra.items() if k in sig.parameters}
+    return geo.geocode(query, **accepted)
 
 load_dotenv()
 
@@ -105,7 +115,10 @@ def _build_geocoder() -> Provider:
 
 geocoder: Provider = _build_geocoder()
 min_delay = float(os.getenv("GEOCODER_MIN_DELAY", "1.0"))
-geocode = RateLimiter(geocoder.geocode, min_delay_seconds=min_delay)
+geocode = RateLimiter(
+    partial(_safe_geocode, geocoder),  # <- shim injected here
+    min_delay_seconds=min_delay,
+)
 reverse = RateLimiter(geocoder.reverse, min_delay_seconds=min_delay)
 
 ###############################################################################
