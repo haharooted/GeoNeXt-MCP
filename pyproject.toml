@@ -1,7 +1,6 @@
 [project]
 name = "geonext-mcp"
 version = "0.2.0"
-description = "FastMCP geocoding server"
 requires-python = ">=3.11"
 dependencies = [
   "fastmcp>=2.2.1",
