@@ -8,28 +8,6 @@ from mcp.server.fastmcp import FastMCP
 
 __version__ = "0.1.0"
 
-'''how to use this code
-uv pip install -r requirements.txt
-add to mcp server config
-
-{
-    "geonext-mcp": {
-        "command": "uv",
-        "args": [
-          "--directory",
-          "geonext-mcp",
-          "run",
-          "geonext-mcp.py"
-        ],
-        "env": {
-        "NOMINATIM_URL": "${NOMINATIM_URL}",
-        "SCHEME": "http",
-        "GEOCODER_PROVIDER": "nominatim"
-        }
-    }
-}
-
-'''
 # Instantiate FastMCP server
 mcp = FastMCP("GeoNeXt-MCP", dependencies=["geopy"])
 
@@ -41,11 +19,10 @@ mcp = FastMCP("GeoNeXt-MCP", dependencies=["geopy"])
 geocoder_name = os.environ.get("GEOCODER_PROVIDER", "nominatim").lower()
 
 if geocoder_name == "nominatim":
-    # For Nominatim, read the domain from NOMINATIM_URL or default to openstreetmap
     domain = os.environ.get("NOMINATIM_URL", "nominatim.openstreetmap.org")
-    scheme = os.environ.get("SCHEME", "http")
-    # If you need https, set scheme='https'
-    app = Nominatim(domain=domain, scheme=scheme)
+    scheme = os.environ.get("SCHEME", "https")
+    user_agent = os.environ.get("NOMINATIM_USER_AGENT", "geonext-mcp/0.1.0")
+    app = Nominatim(domain=domain, scheme=scheme, user_agent=user_agent)
 elif geocoder_name == "arcgis":
     # ArcGIS typically just works; optionally pass username/password or referer
     # if needed for premium data.
