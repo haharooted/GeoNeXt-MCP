@@ -1,1 +1,1 @@
-# geonext
+# GeoNeXt - MCP

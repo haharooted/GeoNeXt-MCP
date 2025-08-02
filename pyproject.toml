@@ -1,14 +1,19 @@
 [project]
 name = "geonext-mcp"
 version = "0.2.0"
-description = "FastMCP geocoding server (Nominatim, Bing, ArcGIS) out‑of‑the‑box"
+description = "FastMCP geocoding server"
 requires-python = ">=3.11"
 dependencies = [
   "fastmcp>=2.2.1",
   "geopy>=2.4.1",
-  "python-dotenv>=1.0",   # optional, just for local .env loading
+  "python-dotenv>=1.0",
   "uvicorn[standard]>=0.29",
 ]
 
-[project.scripts]
-geonext-mcp = "geonext_mcp.server:main"
+# ────────────────────────────────────────────────────────────────────────────────
+# Tell setuptools to package ONLY geonext_mcp, and ignore 'systemd/'
+# ────────────────────────────────────────────────────────────────────────────────
+[tool.setuptools.packages.find]
+include = ["geonext_mcp*"]   # what to keep
+exclude = ["systemd*"]       # what to skip
+# ────────────────────────────────────────────────────────────────────────────────
