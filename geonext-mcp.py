@@ -243,4 +243,9 @@ def distance_between_coords(
         return distance.kilometers
 
 if __name__ == "__main__":
-    mcp.run()
+    mcp.run(
+        transport="http",   # long-running Uvicorn server
+        host="0.0.0.0",
+        port=8000,
+        log_level="info",
+    )
