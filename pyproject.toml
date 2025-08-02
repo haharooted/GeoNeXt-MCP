@@ -1,0 +1,14 @@
+[project]
+name = "Geonext-MCP"
+dynamic = ["version"]
+description = "Geocoding MCP server based on GeoPY backend"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "geopy>=2.4.1",
+    "mcp[cli]>=1.2.0",
+]
+
+
+[tool.hatch.version]
+path = "geonext-mcp.py"
