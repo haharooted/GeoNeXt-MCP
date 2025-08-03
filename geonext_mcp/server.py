@@ -1,10 +1,14 @@
 """
-GeoNeXt‑MCP – hardened version
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+GeoNeXt‑MCP – hardened version (with enhanced logging)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 * Per‑provider rate limits & retries
-* Automatic provider cascade when `provider="auto"`
-* `GeoResult` now includes `provider`
+* Automatic provider cascade when ``provider="auto"``
+* ``GeoResult`` now includes ``provider``
+* **NEW**: Rich DEBUG‑level logging throughout the stack so you can
+  follow every request, retry, and decision while the service runs.
+  Set ``LOG_LEVEL=DEBUG`` (or ``--log-level debug`` when invoking UVicorn)
+  to enable the most verbose output.
 """
 
 from __future__ import annotations
@@ -35,17 +39,21 @@ from geopy.geocoders import (
 ###############################################################################
 load_dotenv()
 
-logging.basicConfig(
-    format="%(asctime)s | %(levelname)-8s | %(message)s",
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
-)
-logger = logging.getLogger("geonext-mcp")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_FILE = os.getenv("LOG_FILE", "geonext-mcp.log")
 
-log_path = os.getenv("LOG_FILE", "geonext-mcp.log")
-if log_path:
-    _fh = logging.FileHandler(log_path, encoding="utf-8")
-    _fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s"))
-    logger.addHandler(_fh)
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    level=LOG_LEVEL,
+    handlers=[
+        logging.StreamHandler(),
+        *( [logging.FileHandler(LOG_FILE, encoding="utf-8")] if LOG_FILE else [] ),
+    ],
+    force=True,  # override any existing configuration – important in notebooks / reloads
+)
+
+logger = logging.getLogger("geonext-mcp")
+logger.debug("Logging initialised – level=%s, file=%s", LOG_LEVEL, LOG_FILE)
 
 ###############################################################################
 # FastMCP server
@@ -53,62 +61,64 @@ if log_path:
 mcp = FastMCP("GeoNeXt‑MCP", dependencies=["geopy"])
 
 ###############################################################################
-# Geocoder factory
+# Geocoder factory helpers
 ###############################################################################
 Provider = Photon | Nominatim | ArcGIS | Bing | GoogleV3 | Pelias | MapBox
 
 
-def _safe_geocode(geo, query: str, **extra):
+def _safe_geocode(geo: Provider, query: str, **extra):
     """Call ``geo.geocode`` but drop kwargs the provider doesn’t accept."""
     sig = inspect.signature(geo.geocode)
     accepted = {k: v for k, v in extra.items() if k in sig.parameters}
+    logger.debug("_safe_geocode(%s) accepted kwargs: %s", geo.__class__.__name__, accepted)
     return geo.geocode(query, **accepted)
 
 
 def _build_geocoder(provider: str | None = None) -> Provider:
     provider = (provider or os.getenv("GEOCODER_PROVIDER", "photon")).lower()
+    logger.debug("Building geocoder for provider=%s", provider)
 
     if provider == "nominatim":
-        return Nominatim(
+        geo = Nominatim(
             user_agent=os.getenv("NOMINATIM_USER_AGENT", "geonext-mcp/0.4.0"),
             domain=os.getenv("NOMINATIM_URL", "nominatim.openstreetmap.org"),
             scheme=os.getenv("SCHEME", "https"),
             timeout=60,
         )
 
-    if provider == "photon":
-        return Photon(
+    elif provider == "photon":
+        geo = Photon(
             user_agent=os.getenv("PHOTON_USER_AGENT", "geonext-mcp/0.4.0"),
             domain=os.getenv("PHOTON_URL", "photon.komoot.io"),
             scheme=os.getenv("SCHEME", "https"),
             timeout=10,
         )
 
-    if provider == "google":
+    elif provider == "google":
         key = os.getenv("GOOGLE_API_KEY")
         if not key:
             raise RuntimeError("GOOGLE_API_KEY is required when provider=google")
-        return GoogleV3(api_key=key, timeout=10)
+        geo = GoogleV3(api_key=key, timeout=10)
 
-    if provider == "bing":
+    elif provider == "bing":
         key = os.getenv("BING_API_KEY")
         if not key:
             raise RuntimeError("BING_API_KEY is required when provider=bing")
-        return Bing(api_key=key, timeout=10)
+        geo = Bing(api_key=key, timeout=10)
 
-    if provider == "arcgis":
-        return ArcGIS(
+    elif provider == "arcgis":
+        geo = ArcGIS(
             username=os.getenv("ARC_USERNAME"),
             password=os.getenv("ARC_PASSWORD"),
             referer=os.getenv("ARC_REFERER"),
             timeout=10,
         )
 
-    if provider in {"pelias", "geocodeearth", "geocode_earth"}:
+    elif provider in {"pelias", "geocodeearth", "geocode_earth"}:
         key = os.getenv("PELIAS_API_KEY")
         if not key:
             raise RuntimeError("PELIAS_API_KEY is required when provider=pelias")
-        return Pelias(
+        geo = Pelias(
             api_key=key,
             domain=os.getenv("PELIAS_URL", "api.geocode.earth"),
             scheme=os.getenv("SCHEME", "https"),
@@ -116,18 +126,21 @@ def _build_geocoder(provider: str | None = None) -> Provider:
             timeout=10,
         )
 
-    if provider == "mapbox":
+    elif provider == "mapbox":
         key = os.getenv("MAPBOX_API_KEY")
         if not key:
             raise RuntimeError("MAPBOX_API_KEY is required when provider=mapbox")
-        return MapBox(
+        geo = MapBox(
             api_key=key,
             user_agent=os.getenv("MAPBOX_USER_AGENT", "geonext-mcp/0.4.0"),
             timeout=10,
         )
 
-    raise ValueError(f"Unsupported geocoder provider: {provider!r}")
+    else:
+        raise ValueError(f"Unsupported geocoder provider: {provider!r}")
 
+    logger.debug("Created %s geocoder: %s", provider, geo)
+    return geo
 
 ###############################################################################
 # Per‑provider throttle policy
@@ -141,6 +154,7 @@ _PROVIDER_POLICY: dict[str, dict[str, float | int]] = {
     "bing": dict(delay=0.1, retries=2, err_wait=1.0),
     "arcgis": dict(delay=0.2, retries=2, err_wait=1.0),
 }
+logger.debug("Provider policy: %s", _PROVIDER_POLICY)
 
 ###############################################################################
 # Rate‑Limiter cache
@@ -152,6 +166,7 @@ def _rate_limited_geocode_for(provider: str) -> RateLimiter:
     provider = provider.lower()
     if provider not in _geocode_cache:
         policy = _PROVIDER_POLICY.get(provider, {"delay": 1.0, "retries": 2, "err_wait": 2.0})
+        logger.debug("Creating RateLimiter for %s with policy=%s", provider, policy)
         _geocode_cache[provider] = RateLimiter(
             partial(_safe_geocode, _build_geocoder(provider)),
             min_delay_seconds=policy["delay"],
@@ -160,7 +175,6 @@ def _rate_limited_geocode_for(provider: str) -> RateLimiter:
             swallow_exceptions=False,  # let us handle them!
         )
     return _geocode_cache[provider]
-
 
 ###############################################################################
 # GeoResult type (with provider field)
@@ -174,7 +188,6 @@ class GeoResult(TypedDict, total=False):
     bounding_box: List[str]
     raw: Dict[str, Any]      # provider JSON
 
-
 ###############################################################################
 # Provider cascade helper
 ###############################################################################
@@ -186,13 +199,18 @@ def _geocode_with_chain(
     chain: list[str],
     max_results: int,
 ) -> List[GeoResult]:
+    logger.info("Geocoding %r using provider chain %s", query, chain)
     errors: list[str] = []
     for prov in chain:
         try:
+            logger.debug("Attempting provider=%s", prov)
             hits = _geocode_single_provider(query, max_results, prov)
             if hits:
+                logger.info("Provider %s returned %d hits – success", prov, len(hits))
                 return hits
+            logger.debug("Provider %s returned no hits", prov)
         except (GeocoderTimedOut, GeocoderServiceError) as exc:
+            logger.warning("Provider %s error: %s", prov, exc)
             errors.append(f"{prov}: {exc}")
     logger.warning("All providers failed for %r – %s", query, " | ".join(errors))
     return []
@@ -203,6 +221,7 @@ def _geocode_single_provider(
     max_results: int,
     provider: str,
 ) -> List[GeoResult]:
+    logger.debug("_geocode_single_provider(query=%s, provider=%s, max_results=%d)", location, provider, max_results)
     geo_fn = _rate_limited_geocode_for(provider)
 
     raw_locs = geo_fn(
@@ -226,8 +245,8 @@ def _geocode_single_provider(
                 raw=r,
             )
         )
+    logger.debug("%s returned %d result(s) for %r", provider, len(results), location)
     return results
-
 
 ###############################################################################
 # FastMCP tools
@@ -241,17 +260,23 @@ def geocode_location(
     """
     Geocode an address / place string.
 
-    * If `provider="auto"` (default) it will try the chain
+    * If ``provider="auto"`` (default) it will try the chain
       Photon → Nominatim → Pelias → Mapbox → Google until it gets hits.
     * Otherwise it queries the specified backend directly.
     """
     provider = provider.lower()
+    logger.info(
+        "geocode_location(location=%r, max_results=%d, provider=%s)",
+        location,
+        max_results,
+        provider,
+    )
     try:
         if provider == "auto":
             return _geocode_with_chain(location, _DEFAULT_CHAIN, max_results)
         return _geocode_single_provider(location, max_results, provider)
     except (GeocoderTimedOut, GeocoderServiceError) as exc:
-        logger.warning("geocode_location error (%s): %s", provider, exc)
+        logger.error("geocode_location error (%s): %s", provider, exc)
         return []
 
 
@@ -259,8 +284,9 @@ def geocode_location(
 def reverse_geocode(lat: float, lon: float, provider: str = "photon") -> Optional[GeoResult]:
     """
     Reverse‑geocode a lat/lon pair.  
-    `provider` is exposed mainly for testing; defaults to Photon.
+    ``provider`` is exposed mainly for testing; defaults to Photon.
     """
+    logger.info("reverse_geocode(lat=%s, lon=%s, provider=%s)", lat, lon, provider)
     rev_fn = _build_geocoder(provider).reverse
     limiter = RateLimiter(
         rev_fn,
@@ -271,9 +297,10 @@ def reverse_geocode(lat: float, lon: float, provider: str = "photon") -> Optiona
     try:
         loc = limiter((lat, lon), addressdetails=True)
         if not loc:
+            logger.debug("No reverse‑geocode hit for %s,%s via %s", lat, lon, provider)
             return None
         raw = loc.raw or {}
-        return GeoResult(
+        result = GeoResult(
             provider=provider,
             latitude=lat,
             longitude=lon,
@@ -282,21 +309,25 @@ def reverse_geocode(lat: float, lon: float, provider: str = "photon") -> Optiona
             bounding_box=raw.get("boundingbox", []),
             raw=raw,
         )
+        logger.debug("Reverse‑geocode result: %s", result)
+        return result
     except (GeocoderTimedOut, GeocoderServiceError) as exc:
-        logger.warning("reverse_geocode error (%s): %s", provider, exc)
+        logger.error("reverse_geocode error (%s): %s", provider, exc)
         return None
 
 
 @mcp.tool()
 def geocode_with_details(location: str, provider: str = "photon") -> Optional[GeoResult]:
     """Single best match with extra address details & bounding box."""
+    logger.info("geocode_with_details(location=%r, provider=%s)", location, provider)
     geo = _build_geocoder(provider)
     try:
         loc = geo.geocode(location, addressdetails=True)
         if not loc:
+            logger.debug("No detailed geocode hit for %r via %s", location, provider)
             return None
         raw = loc.raw or {}
-        return GeoResult(
+        result = GeoResult(
             provider=provider,
             latitude=loc.latitude,
             longitude=loc.longitude,
@@ -305,10 +336,11 @@ def geocode_with_details(location: str, provider: str = "photon") -> Optional[Ge
             bounding_box=raw.get("boundingbox", []),
             raw=raw,
         )
+        logger.debug("Detailed geocode result: %s", result)
+        return result
     except (GeocoderTimedOut, GeocoderServiceError) as exc:
-        logger.warning("geocode_with_details error (%s): %s", provider, exc)
+        logger.error("geocode_with_details error (%s): %s", provider, exc)
         return None
-
 
 ###############################################################################
 # Bulk helpers still use provider cascade
@@ -321,16 +353,18 @@ def geocode_locations(
 ) -> Union[List[GeoResult], List[List[GeoResult]]]:
     """
     Geocode one **or many** location strings. Uses the same provider logic
-    as `geocode_location`.
+    as ``geocode_location``.
     """
+    logger.info("geocode_locations(%r, provider=%s)", locations, provider)
+
     queries = [locations] if isinstance(locations, str) else locations
     all_results: List[List[GeoResult]] = []
 
     for query in queries:
+        logger.debug("Bulk geocode query=%r", query)
         all_results.append(geocode_location(query, max_results, provider))
 
     return all_results[0] if isinstance(locations, str) else all_results
-
 
 ###############################################################################
 # Legacy helpers
@@ -338,8 +372,10 @@ def geocode_locations(
 @mcp.tool()
 def geocode_multiple_locations(locations: List[str]) -> List[Optional[GeoResult]]:
     """Bulk geocode; **first candidate only** per query (legacy)."""
+    logger.info("geocode_multiple_locations(len=%d)", len(locations))
     results: List[Optional[GeoResult]] = []
     for loc in locations:
+        logger.debug("Legacy bulk geocode query=%r", loc)
         matches = geocode_location(loc, max_results=1)
         results.append(matches[0] if matches else None)
     return results
@@ -348,6 +384,7 @@ def geocode_multiple_locations(locations: List[str]) -> List[Optional[GeoResult]
 @mcp.tool()
 def reverse_geocode_multiple_locations(coords: List[List[float]]) -> List[Optional[GeoResult]]:
     """Bulk reverse‑geocode a list of [lat, lon] pairs."""
+    logger.info("reverse_geocode_multiple_locations(len=%d)", len(coords))
     return [
         reverse_geocode(lat, lon) if len(pair) == 2 else None
         for pair in coords
@@ -356,7 +393,7 @@ def reverse_geocode_multiple_locations(coords: List[List[float]]) -> List[Option
 
 
 ###############################################################################
-# Distance helpers (unchanged)
+# Distance helpers (unchanged, but log inputs/outputs)
 ###############################################################################
 @mcp.tool(name="distance_between_coords")
 def _distance_between_coords(
@@ -367,8 +404,13 @@ def _distance_between_coords(
     unit: str = "kilometers",
 ) -> float:
     """Great‑circle distance between two lat/lon points."""
+    logger.debug(
+        "distance_between_coords(%s,%s -> %s,%s, unit=%s)", lat1, lon1, lat2, lon2, unit
+    )
     dist = geodistance((lat1, lon1), (lat2, lon2))
-    return dist.miles if unit.lower().startswith("mile") else dist.kilometers
+    res = dist.miles if unit.lower().startswith("mile") else dist.kilometers
+    logger.debug("Computed distance: %s %s", res, unit)
+    return res
 
 
 @mcp.tool(name="distance_between_addresses")
@@ -378,9 +420,11 @@ def distance_between_addresses(
     unit: str = "kilometers",
 ) -> Optional[float]:
     """Distance between two address strings (uses first match for each)."""
+    logger.info("distance_between_addresses(%r, %r, unit=%s)", address1, address2, unit)
     loc1 = geocode_location(address1, max_results=1)
     loc2 = geocode_location(address2, max_results=1)
     if not (loc1 and loc2):
+        logger.warning("Could not geocode one or both addresses: %s | %s", loc1, loc2)
         return None
     p1, p2 = loc1[0], loc2[0]
     return _distance_between_coords(
@@ -395,7 +439,9 @@ def distance_between_addresses(
 ###############################################################################
 # Entrypoint
 ###############################################################################
+
 def main() -> None:
+    logger.info("Starting GeoNeXt‑MCP server…")
     mcp.run(
         transport="sse",
         host=os.getenv("HOST", "0.0.0.0"),
