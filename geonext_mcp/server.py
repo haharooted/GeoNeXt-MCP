@@ -192,16 +192,13 @@ def geocode_location(
     """
     Geocode *one* address / place string **using the specified `provider`.**
 
-    Only this helper is provider‑aware; all other tools continue to use the
-    globally configured (default **Nominatim**) backend.
-
     Parameters
     ----------
     location : str
         Free‑text place or address.
     max_results : int, default = 5
         Upper bound on returned candidates.
-    provider : str, default ``"nominatim"``
+    provider : str, default ``"nominatim"`` - only Nominatim works for now.
         Which geocoder backend to query (``nominatim``, ``photon``, ``pelias``,
         ``mapbox``, ``google``, ``bing``, ``arcgis``).
     """
