@@ -198,23 +198,29 @@ def _geocode_with_chain(
     chain: list[str],
     max_results: int,
 ) -> List[GeoResult]:
-    logger.info("Geocoding %r using provider chain %s", query, chain)
+    """
+    Try up to `_MAX_ROLLS` providers **only when the current one raises
+    an exception**.  
+    If a provider returns an empty result set, that is considered a
+    *successful* answer and we stop there.
+    """
     errors: list[str] = []
-    for idx, prov in enumerate(chain):
-        if idx >= _MAX_ROLLS:        # ← stop after the configured rolls
+
+    for rolls, prov in enumerate(chain):
+        if rolls >= _MAX_ROLLS:
             break
+
         try:
-            logger.debug("Attempting provider=%s", prov)
+            # Will raise on timeout / HTTP error, otherwise always returns
             hits = _geocode_single_provider(query, max_results, prov)
-            if hits:
-                logger.info("Provider %s returned %d hits – success", prov, len(hits))
-                return hits
-            logger.debug("Provider %s returned no hits", prov)
+            return hits               # even if `hits` is [], we are done
         except (GeocoderTimedOut, GeocoderServiceError) as exc:
-            logger.warning("Provider %s error: %s", prov, exc)
             errors.append(f"{prov}: {exc}")
-    logger.warning("All providers failed for %r – %s", query, " | ".join(errors))
-    return []
+            continue                  # roll to the next provider
+
+    logger.warning("All attempted providers errored for %r – %s", query, " | ".join(errors))
+    return []                         # every try raised an exception
+
 
 
 def _geocode_single_provider(
@@ -261,8 +267,8 @@ def geocode_location(
     """
     Geocode an address / place string.
 
-    * If ``provider="auto"`` (default) it will try the chain
-      Photon → Nominatim → Pelias → Mapbox → Google until it gets hits.
+    * If ``provider="auto"`` (default) If it gets an error from the server it will try the chain
+      Photon → Nominatim → Pelias → Mapbox → Google until something returns a) an empty list - no results or b) results
     * Otherwise it queries the specified backend directly.
     """
     provider = provider.lower()
