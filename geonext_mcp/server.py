@@ -164,16 +164,19 @@ _geocode_cache: dict[str, RateLimiter] = {}
 def _rate_limited_geocode_for(provider: str) -> RateLimiter:
     provider = provider.lower()
     if provider not in _geocode_cache:
-        policy = _PROVIDER_POLICY.get(provider, {"delay": 1.0, "retries": 2, "err_wait": 2.0})
-        logger.debug("Creating RateLimiter for %s with policy=%s", provider, policy)
+        policy = _PROVIDER_POLICY.get(provider, {"delay": 1.0})
+        delay    = policy["delay"]
+        err_wait = policy.get("err_wait", delay)
+
         _geocode_cache[provider] = RateLimiter(
             partial(_safe_geocode, _build_geocoder(provider)),
-            min_delay_seconds=policy["delay"],
+            min_delay_seconds=delay,
             max_retries=0,
-            error_wait_seconds=0.0,
-            swallow_exceptions=False,  # let us handle them!
+            error_wait_seconds=err_wait,
+            swallow_exceptions=False,
         )
     return _geocode_cache[provider]
+
 
 ###############################################################################
 # GeoResult type (with provider field)
