@@ -25,7 +25,10 @@ from geopy.geocoders import (
     Bing,
     Photon,
     GoogleV3,
+    Pelias,          # NEW
+    MapBox,          # NEW
 )
+
 
 def _safe_geocode(geo, query: str, **extra):
     """
@@ -66,15 +69,23 @@ mcp = FastMCP(
 ###############################################################################
 # Geocoder factory
 ###############################################################################
-Provider = Nominatim | ArcGIS | Bing | Photon | GoogleV3
+Provider = Nominatim | ArcGIS | Bing | Photon | GoogleV3 | Pelias | MapBox
 
+def _build_geocoder(provider: str | None = None) -> Provider:
+    """
+    Return a configured *synchronous* geocoder instance.
 
-def _build_geocoder() -> Provider:
-    provider = os.getenv("GEOCODER_PROVIDER", "nominatim").lower()
+    Parameters
+    ----------
+    provider : str | None
+        Name of the backend. If *None*, falls back to the
+        ``GEOCODER_PROVIDER`` environment variable or **nominatim**.
+    """
+    provider = (provider or os.getenv("GEOCODER_PROVIDER", "nominatim")).lower()
 
     if provider == "nominatim":
         return Nominatim(
-            user_agent=os.getenv("NOMINATIM_USER_AGENT", "geonext-mcp/0.2.0"),
+            user_agent=os.getenv("NOMINATIM_USER_AGENT", "geonext-mcp/0.3.0"),
             domain=os.getenv("NOMINATIM_URL", "nominatim.openstreetmap.org"),
             scheme=os.getenv("SCHEME", "https"),
             timeout=60,
@@ -82,7 +93,7 @@ def _build_geocoder() -> Provider:
 
     if provider == "photon":
         return Photon(
-            user_agent=os.getenv("PHOTON_USER_AGENT", "geonext-mcp/0.2.0"),
+            user_agent=os.getenv("PHOTON_USER_AGENT", "geonext-mcp/0.3.0"),
             domain=os.getenv("PHOTON_URL", "photon.komoot.io"),
             scheme=os.getenv("SCHEME", "https"),
             timeout=10,
@@ -91,15 +102,13 @@ def _build_geocoder() -> Provider:
     if provider == "google":
         key = os.getenv("GOOGLE_API_KEY")
         if not key:
-            raise RuntimeError(
-                "GOOGLE_API_KEY is required when GEOCODER_PROVIDER=google"
-            )
+            raise RuntimeError("GOOGLE_API_KEY is required when provider=google")
         return GoogleV3(api_key=key, timeout=10)
 
     if provider == "bing":
         key = os.getenv("BING_API_KEY")
         if not key:
-            raise RuntimeError("BING_API_KEY is required when GEOCODER_PROVIDER=bing")
+            raise RuntimeError("BING_API_KEY is required when provider=bing")
         return Bing(api_key=key, timeout=10)
 
     if provider == "arcgis":
@@ -110,16 +119,54 @@ def _build_geocoder() -> Provider:
             timeout=10,
         )
 
-    raise ValueError(f"Unsupported geocoder provider: {provider}")
+    if provider in {"pelias", "geocodeearth", "geocode_earth"}:
+        key = os.getenv("PELIAS_API_KEY")
+        if not key:
+            raise RuntimeError("PELIAS_API_KEY is required when provider=pelias")
+        return Pelias(                               # see geopy docs §Pelias :contentReference[oaicite:0]{index=0}
+            api_key=key,
+            domain=os.getenv("PELIAS_URL", "api.geocode.earth"),
+            scheme=os.getenv("SCHEME", "https"),
+            user_agent=os.getenv("PELIAS_USER_AGENT", "geonext-mcp/0.3.0"),
+            timeout=10,
+        )
 
+    if provider == "mapbox":
+        key = os.getenv("MAPBOX_API_KEY")
+        if not key:
+            raise RuntimeError("MAPBOX_API_KEY is required when provider=mapbox")
+        return MapBox(                              # see geopy docs §MapBox  :contentReference[oaicite:1]{index=1}
+            api_key=key,
+            user_agent=os.getenv("MAPBOX_USER_AGENT", "geonext-mcp/0.3.0"),
+            timeout=10,
+        )
 
+    raise ValueError(f"Unsupported geocoder provider: {provider!r}")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Global *default* geocoder (still Nominatim unless env overrides)
+# ──────────────────────────────────────────────────────────────────────────────
 geocoder: Provider = _build_geocoder()
 min_delay = float(os.getenv("GEOCODER_MIN_DELAY", "1.0"))
-geocode = RateLimiter(
-    partial(_safe_geocode, geocoder),  # <- shim injected here
-    min_delay_seconds=min_delay,
-)
-reverse = RateLimiter(geocoder.reverse, min_delay_seconds=min_delay)
+
+geocode = RateLimiter(partial(_safe_geocode, geocoder), min_delay_seconds=min_delay)
+reverse = RateLimiter(geocoder.reverse,             min_delay_seconds=min_delay)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Per‑provider Rate‑Limiter cache (used only by geocode_location)
+# ──────────────────────────────────────────────────────────────────────────────
+_geocode_cache: dict[str, RateLimiter] = {}
+
+
+def _rate_limited_geocode_for(provider: str) -> RateLimiter:
+    provider = provider.lower()
+    if provider not in _geocode_cache:
+        _geocode_cache[provider] = RateLimiter(
+            partial(_safe_geocode, _build_geocoder(provider)),
+            min_delay_seconds=min_delay,
+        )
+    return _geocode_cache[provider]
+
 
 ###############################################################################
 # Typed return payloads
@@ -133,43 +180,57 @@ class GeoResult(TypedDict, total=False):
     bounding_box: List[str]
     raw: Dict[str, Any]  # full provider JSON for maximum context
 
-
-###############################################################################
-# Core helpers
-###############################################################################
+# ──────────────────────────────────────────────────────────────────────────────
+# geocode_location – provider now selectable at call‑time
+# ──────────────────────────────────────────────────────────────────────────────
 @mcp.tool()
-def geocode_location(location: str, max_results: int = 5) -> List[GeoResult]:
+def geocode_location(
+    location: str,
+    max_results: int = 5,
+    provider: str = "nominatim",
+) -> List[GeoResult]:
     """
-    Geocode *one* address / place string.
+    Geocode *one* address / place string **using the specified `provider`.**
 
-    Returns an **ordered list** (possibly empty) of up to ``max_results``
-    candidates, each as a ``GeoResult``.
+    Only this helper is provider‑aware; all other tools continue to use the
+    globally configured (default **Nominatim**) backend.
+
+    Parameters
+    ----------
+    location : str
+        Free‑text place or address.
+    max_results : int, default = 5
+        Upper bound on returned candidates.
+    provider : str, default ``"nominatim"``
+        Which geocoder backend to query (``nominatim``, ``photon``, ``pelias``,
+        ``mapbox``, ``google``, ``bing``, ``arcgis``).
     """
+    geo_fn = _rate_limited_geocode_for(provider)
+
     try:
-        raw_locs = geocode(
+        raw_locs = geo_fn(
             location,
             exactly_one=False,
             limit=max_results,
             addressdetails=True,
         )
     except (GeocoderTimedOut, GeocoderServiceError) as exc:
-        logger.warning("geocode_location error: %s", exc)
+        logger.warning("geocode_location error (%s): %s", provider, exc)
         return []
 
     results: List[GeoResult] = []
-    if raw_locs:
-        for loc in raw_locs[:max_results]:
-            r = loc.raw or {}
-            results.append(
-                GeoResult(
-                    latitude=loc.latitude,
-                    longitude=loc.longitude,
-                    address=loc.address,
-                    details=r.get("address", {}),
-                    bounding_box=r.get("boundingbox", []),
-                    raw=r,
-                )
+    for loc in (raw_locs or [])[:max_results]:
+        r = loc.raw or {}
+        results.append(
+            GeoResult(
+                latitude=loc.latitude,
+                longitude=loc.longitude,
+                address=loc.address,
+                details=r.get("address", {}),
+                bounding_box=r.get("boundingbox", []),
+                raw=r,
             )
+        )
     return results
 
 
