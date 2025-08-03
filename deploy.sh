@@ -54,8 +54,9 @@ if [[ ! -f "$ENV_FILE" ]]; then
 # GeoNeXt‑MCP runtime options
 # ---------------------------------------------------------------------------
 LOG_LEVEL=info
-# GEOCODER_PROVIDER=nominatim
+# GEOCODER_PROVIDER=photon
 # NOMINATIM_URL=nominatim.openstreetmap.org
+# GEOCODER_MIN_DELAY=0
 EOF
   chown root:root "$ENV_FILE"
   chmod 640 "$ENV_FILE"

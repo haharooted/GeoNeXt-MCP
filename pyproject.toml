@@ -1,8 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel", "build"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "geonext-mcp"
-version = "0.2.0"
+name            = "geonext-mcp"
+version         = "0.2.1"
+description     = "Fast geocoding MCP server for LLMs"
+readme          = "README.md"
+authors         = [ {name = "Haharooted", email = "haharooted@gmail.com"} ]
+license         = {file = "LICENSE"}
+classifiers     = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
 requires-python = ">=3.11"
-dependencies = [
+dependencies    = [
   "fastmcp>=2.11.0",
   "geopy>=2.4.1",
   "python-dotenv>=1.0",
@@ -10,5 +23,5 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["geonext_mcp*"]   # what to keep
-exclude = ["systemd*"]       # what to skip
+include = ["geonext_mcp*"]
+exclude = ["systemd*"]
