@@ -30,6 +30,14 @@ from geopy.geocoders import (
 )
 
 
+_PROVIDER_POLICY = {
+    "photon":     dict(delay=1.0, retries=2,  err_wait=2.0),
+    "nominatim":  dict(delay=1.0, retries=2,  err_wait=2.0),
+    "pelias":     dict(delay=0.3, retries=2,  err_wait=1.0),
+    "mapbox":     dict(delay=0.3, retries=2, err_wait=1.0),
+    "google":     dict(delay=0.3, retries=2,  err_wait=1.0),
+}
+
 def _safe_geocode(geo, query: str, **extra):
     """
     Call ``geo.geocode`` but drop any kwargs the provider does not accept.
@@ -152,18 +160,37 @@ min_delay = float(os.getenv("GEOCODER_MIN_DELAY", "1.0"))
 geocode = RateLimiter(partial(_safe_geocode, geocoder), min_delay_seconds=min_delay)
 reverse = RateLimiter(geocoder.reverse,             min_delay_seconds=min_delay)
 
+_DEFAULT_CHAIN = ["photon", "nominatim", "pelias", "mapbox", "google"]
+
+def _geocode_with_chain(query: str,
+                        chain: list[str],
+                        max_results: int) -> list[GeoResult]:
+    errors: list[str] = []
+    for prov in chain:
+        try:
+            hits = geocode_location(query, max_results=max_results, provider=prov)
+            if hits:                              # success – use them!
+                return hits
+        except (GeocoderTimedOut, GeocoderServiceError) as exc:
+            errors.append(f"{prov}: {exc}")
+    logger.warning("All providers failed for %r – %s", query, " | ".join(errors))
+    return []
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Per‑provider Rate‑Limiter cache (used only by geocode_location)
 # ──────────────────────────────────────────────────────────────────────────────
 _geocode_cache: dict[str, RateLimiter] = {}
 
-
 def _rate_limited_geocode_for(provider: str) -> RateLimiter:
     provider = provider.lower()
     if provider not in _geocode_cache:
+        policy = _PROVIDER_POLICY.get(provider, {"delay": 1.0, "retries": 2, "err_wait": 2.0})
         _geocode_cache[provider] = RateLimiter(
             partial(_safe_geocode, _build_geocoder(provider)),
-            min_delay_seconds=min_delay,
+            min_delay_seconds   = policy["delay"],
+            max_retries         = policy["retries"],
+            error_wait_seconds  = policy["err_wait"],
+            swallow_exceptions  = False,           # <-- propagate!
         )
     return _geocode_cache[provider]
 
@@ -172,13 +199,13 @@ def _rate_limited_geocode_for(provider: str) -> RateLimiter:
 # Typed return payloads
 ###############################################################################
 class GeoResult(TypedDict, total=False):
-    """Standardised response shape for all geocoding tools."""
+    provider: str
     latitude: float
     longitude: float
     address: str
     details: Dict[str, Any]
     bounding_box: List[str]
-    raw: Dict[str, Any]  # full provider JSON for maximum context
+    raw: Dict[str, Any]
 
 # ──────────────────────────────────────────────────────────────────────────────
 # geocode_location – provider now selectable at call‑time
@@ -199,8 +226,8 @@ def geocode_location(
     max_results : int, default = 5
         Upper bound on returned candidates.
     provider : str, default ``"photon"``
-        Which geocoder backend to query (``nominatim``, ``photon``, ``pelias``,
-        ``mapbox``, ``google``).
+        Which geocoder backend to query (``photon``, ``nominatim``, ``pelias``,
+        ``mapbox``, ``google``). If one fails then try again witb another geocoder in the prioritised above order.
     """
     geo_fn = _rate_limited_geocode_for(provider)
 
@@ -220,6 +247,7 @@ def geocode_location(
         r = loc.raw or {}
         results.append(
             GeoResult(
+                provider=provider,
                 latitude=loc.latitude,
                 longitude=loc.longitude,
                 address=loc.address,
