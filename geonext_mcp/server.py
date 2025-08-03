@@ -1,14 +1,5 @@
 """
-GeoNeXt‑MCP – hardened version (with enhanced logging)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-* Per‑provider rate limits & retries
-* Automatic provider cascade when ``provider="auto"``
-* ``GeoResult`` now includes ``provider``
-* **NEW**: Rich DEBUG‑level logging throughout the stack so you can
-  follow every request, retry, and decision while the service runs.
-  Set ``LOG_LEVEL=DEBUG`` (or ``--log-level debug`` when invoking UVicorn)
-  to enable the most verbose output.
+GeoNeXt-MCP
 """
 
 from __future__ import annotations
@@ -41,6 +32,7 @@ load_dotenv()
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_FILE = os.getenv("LOG_FILE", "geonext-mcp.log")
+_MAX_ROLLS = int(os.getenv("GEOCODER_MAX_ROLLS", "2"))
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
@@ -146,13 +138,20 @@ def _build_geocoder(provider: str | None = None) -> Provider:
 # Per‑provider throttle policy
 ###############################################################################
 _PROVIDER_POLICY: dict[str, dict[str, float | int]] = {
-    "photon": dict(delay=1.0, retries=2, err_wait=2.0),
-    "nominatim": dict(delay=1.0, retries=2, err_wait=2.0),
-    "pelias": dict(delay=0.3, retries=2, err_wait=1.5),
-    "mapbox": dict(delay=0.15, retries=2, err_wait=1.0),
-    "google": dict(delay=0.1, retries=2, err_wait=1.0),
-    "bing": dict(delay=0.1, retries=2, err_wait=1.0),
-    "arcgis": dict(delay=0.2, retries=2, err_wait=1.0),
+    # "photon": dict(delay=1.0, retries=2, err_wait=2.0),
+    # "nominatim": dict(delay=1.0, retries=2, err_wait=2.0),
+    # "pelias": dict(delay=0.3, retries=2, err_wait=1.5),
+    # "mapbox": dict(delay=0.15, retries=2, err_wait=1.0),
+    # "google": dict(delay=0.1, retries=2, err_wait=1.0),
+    # "bing": dict(delay=0.1, retries=2, err_wait=1.0),
+    # "arcgis": dict(delay=0.2, retries=2, err_wait=1.0),
+    "photon":    dict(delay=1.0),
+    "nominatim": dict(delay=1.0),
+    "pelias":    dict(delay=0.3),
+    "mapbox":    dict(delay=0.15),
+    "google":    dict(delay=0.1),
+    "bing":      dict(delay=0.1),
+    "arcgis":    dict(delay=0.2),
 }
 logger.debug("Provider policy: %s", _PROVIDER_POLICY)
 
@@ -170,8 +169,8 @@ def _rate_limited_geocode_for(provider: str) -> RateLimiter:
         _geocode_cache[provider] = RateLimiter(
             partial(_safe_geocode, _build_geocoder(provider)),
             min_delay_seconds=policy["delay"],
-            max_retries=policy["retries"],
-            error_wait_seconds=policy["err_wait"],
+            max_retries=0,
+            error_wait_seconds=0.0,
             swallow_exceptions=False,  # let us handle them!
         )
     return _geocode_cache[provider]
@@ -201,7 +200,9 @@ def _geocode_with_chain(
 ) -> List[GeoResult]:
     logger.info("Geocoding %r using provider chain %s", query, chain)
     errors: list[str] = []
-    for prov in chain:
+    for idx, prov in enumerate(chain):
+        if idx >= _MAX_ROLLS:        # ← stop after the configured rolls
+            break
         try:
             logger.debug("Attempting provider=%s", prov)
             hits = _geocode_single_provider(query, max_results, prov)
