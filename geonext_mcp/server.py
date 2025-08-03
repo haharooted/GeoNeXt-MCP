@@ -69,7 +69,7 @@ mcp = FastMCP(
 ###############################################################################
 # Geocoder factory
 ###############################################################################
-Provider = Nominatim | ArcGIS | Bing | Photon | GoogleV3 | Pelias | MapBox
+Provider = Photon | Nominatim | ArcGIS | Bing | GoogleV3 | Pelias | MapBox
 
 def _build_geocoder(provider: str | None = None) -> Provider:
     """
@@ -79,9 +79,9 @@ def _build_geocoder(provider: str | None = None) -> Provider:
     ----------
     provider : str | None
         Name of the backend. If *None*, falls back to the
-        ``GEOCODER_PROVIDER`` environment variable or **nominatim**.
+        ``GEOCODER_PROVIDER`` environment variable or **photon**.
     """
-    provider = (provider or os.getenv("GEOCODER_PROVIDER", "nominatim")).lower()
+    provider = (provider or os.getenv("GEOCODER_PROVIDER", "photon")).lower()
 
     if provider == "nominatim":
         return Nominatim(
@@ -144,7 +144,7 @@ def _build_geocoder(provider: str | None = None) -> Provider:
     raise ValueError(f"Unsupported geocoder provider: {provider!r}")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Global *default* geocoder (still Nominatim unless env overrides)
+# Global *default* geocoder (still Photon unless env overrides)
 # ──────────────────────────────────────────────────────────────────────────────
 geocoder: Provider = _build_geocoder()
 min_delay = float(os.getenv("GEOCODER_MIN_DELAY", "1.0"))
@@ -187,7 +187,7 @@ class GeoResult(TypedDict, total=False):
 def geocode_location(
     location: str,
     max_results: int = 5,
-    provider: str = "nominatim",
+    provider: str = "photon",
 ) -> List[GeoResult]:
     """
     Geocode *one* address / place string **using the specified `provider`.**
@@ -198,9 +198,9 @@ def geocode_location(
         Free‑text place or address.
     max_results : int, default = 5
         Upper bound on returned candidates.
-    provider : str, default ``"nominatim"`` - only Nominatim works for now.
+    provider : str, default ``"photon"``
         Which geocoder backend to query (``nominatim``, ``photon``, ``pelias``,
-        ``mapbox``, ``google``, ``bing``, ``arcgis``).
+        ``mapbox``, ``google``).
     """
     geo_fn = _rate_limited_geocode_for(provider)
 
